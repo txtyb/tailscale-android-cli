@@ -113,6 +113,7 @@ REMOVE=(
     tap
     kube
     completion
+    completion_scripts
     wakeonlan
     capture
     systray
