@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipnlocal
@@ -6,16 +6,19 @@ package ipnlocal
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"sync"
 	"sync/atomic"
 
 	"go4.org/netipx"
+	"tailscale.com/appc"
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/ipn"
 	"tailscale.com/net/dns"
 	"tailscale.com/net/tsaddr"
+	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/dnstype"
 	"tailscale.com/types/key"
@@ -28,7 +31,6 @@ import (
 	"tailscale.com/util/mak"
 	"tailscale.com/util/slicesx"
 	"tailscale.com/wgengine/filter"
-	"tailscale.com/wgengine/magicsock"
 )
 
 // nodeBackend is node-specific [LocalBackend] state. It is usually the current node.
@@ -75,13 +77,11 @@ type nodeBackend struct {
 	filterAtomic atomic.Pointer[filter.Filter]
 
 	// initialized once and immutable
-	eventClient  *eventbus.Client
-	filterPub    *eventbus.Publisher[magicsock.FilterUpdate]
-	nodeViewsPub *eventbus.Publisher[magicsock.NodeViewsUpdate]
-	nodeMutsPub  *eventbus.Publisher[magicsock.NodeMutationsUpdate]
+	eventClient    *eventbus.Client
+	derpMapViewPub *eventbus.Publisher[tailcfg.DERPMapView]
 
 	// TODO(nickkhyl): maybe use sync.RWMutex?
-	mu sync.Mutex // protects the following fields
+	mu syncs.Mutex // protects the following fields
 
 	shutdownOnce sync.Once     // guards calling [nodeBackend.shutdown]
 	readyCh      chan struct{} // closed by [nodeBackend.ready]; nil after shutdown
@@ -118,10 +118,7 @@ func newNodeBackend(ctx context.Context, logf logger.Logf, bus *eventbus.Bus) *n
 	// Default filter blocks everything and logs nothing.
 	noneFilter := filter.NewAllowNone(logger.Discard, &netipx.IPSet{})
 	nb.filterAtomic.Store(noneFilter)
-	nb.filterPub = eventbus.Publish[magicsock.FilterUpdate](nb.eventClient)
-	nb.nodeViewsPub = eventbus.Publish[magicsock.NodeViewsUpdate](nb.eventClient)
-	nb.nodeMutsPub = eventbus.Publish[magicsock.NodeMutationsUpdate](nb.eventClient)
-	nb.filterPub.Publish(magicsock.FilterUpdate{Filter: nb.filterAtomic.Load()})
+	nb.derpMapViewPub = eventbus.Publish[tailcfg.DERPMapView](nb.eventClient)
 	return nb
 }
 
@@ -431,12 +428,11 @@ func (nb *nodeBackend) SetNetMap(nm *netmap.NetworkMap) {
 	nb.netMap = nm
 	nb.updateNodeByAddrLocked()
 	nb.updatePeersLocked()
-	nv := magicsock.NodeViewsUpdate{}
 	if nm != nil {
-		nv.SelfNode = nm.SelfNode
-		nv.Peers = nm.Peers
+		nb.derpMapViewPub.Publish(nm.DERPMap.View())
+	} else {
+		nb.derpMapViewPub.Publish(tailcfg.DERPMapView{})
 	}
-	nb.nodeViewsPub.Publish(nv)
 }
 
 func (nb *nodeBackend) updateNodeByAddrLocked() {
@@ -512,9 +508,6 @@ func (nb *nodeBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bo
 	// call (e.g. its endpoints + online status both change)
 	var mutableNodes map[tailcfg.NodeID]*tailcfg.Node
 
-	update := magicsock.NodeMutationsUpdate{
-		Mutations: make([]netmap.NodeMutation, 0, len(muts)),
-	}
 	for _, m := range muts {
 		n, ok := mutableNodes[m.NodeIDBeingMutated()]
 		if !ok {
@@ -525,14 +518,12 @@ func (nb *nodeBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bo
 			}
 			n = nv.AsStruct()
 			mak.Set(&mutableNodes, nv.ID(), n)
-			update.Mutations = append(update.Mutations, m)
 		}
 		m.Apply(n)
 	}
 	for nid, n := range mutableNodes {
 		nb.peers[nid] = n.View()
 	}
-	nb.nodeMutsPub.Publish(update)
 	return true
 }
 
@@ -554,7 +545,6 @@ func (nb *nodeBackend) filter() *filter.Filter {
 
 func (nb *nodeBackend) setFilter(f *filter.Filter) {
 	nb.filterAtomic.Store(f)
-	nb.filterPub.Publish(magicsock.FilterUpdate{Filter: f})
 }
 
 func (nb *nodeBackend) dnsConfigForNetmap(prefs ipn.PrefsView, selfExpired bool, versionOS string) *dns.Config {
@@ -688,8 +678,9 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 	}
 
 	dcfg := &dns.Config{
-		Routes: map[dnsname.FQDN][]*dnstype.Resolver{},
-		Hosts:  map[dnsname.FQDN][]netip.Addr{},
+		AcceptDNS: prefs.CorpDNS(),
+		Routes:    map[dnsname.FQDN][]*dnstype.Resolver{},
+		Hosts:     map[dnsname.FQDN][]netip.Addr{},
 	}
 
 	// selfV6Only is whether we only have IPv6 addresses ourselves.
@@ -742,9 +733,21 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 		}
 		dcfg.Hosts[fqdn] = ips
 	}
-	set(nm.Name, nm.GetAddresses())
+	set(nm.SelfName(), nm.GetAddresses())
+	if nm.AllCaps.Contains(tailcfg.NodeAttrDNSSubdomainResolve) {
+		if fqdn, err := dnsname.ToFQDN(nm.SelfName()); err == nil {
+			dcfg.SubdomainHosts.Make()
+			dcfg.SubdomainHosts.Add(fqdn)
+		}
+	}
 	for _, peer := range peers {
 		set(peer.Name(), peer.Addresses())
+		if peer.CapMap().Contains(tailcfg.NodeAttrDNSSubdomainResolve) {
+			if fqdn, err := dnsname.ToFQDN(peer.Name()); err == nil {
+				dcfg.SubdomainHosts.Make()
+				dcfg.SubdomainHosts.Add(fqdn)
+			}
+		}
 	}
 	for _, rec := range nm.DNS.ExtraRecords {
 		switch rec.Type {
@@ -835,6 +838,25 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 
 	// Add split DNS routes, with no regard to exit node configuration.
 	addSplitDNSRoutes(nm.DNS.Routes)
+
+	// Add split DNS routes for conn25
+	conn25DNSTargets := appc.PickSplitDNSPeers(nm.HasCap, nm.SelfNode, peers)
+	if conn25DNSTargets != nil {
+		var m map[string][]*dnstype.Resolver
+		for domain, candidateSplitDNSPeers := range conn25DNSTargets {
+			for _, peer := range candidateSplitDNSPeers {
+				base := peerAPIBase(nm, peer)
+				if base == "" {
+					continue
+				}
+				mak.Set(&m, domain, []*dnstype.Resolver{{Addr: fmt.Sprintf("%s/dns-query", base)}})
+				break // Just make one resolver for the first peer we can get a peerAPIBase for.
+			}
+		}
+		if m != nil {
+			addSplitDNSRoutes(m)
+		}
+	}
 
 	// Set FallbackResolvers as the default resolvers in the
 	// scenarios that can't handle a purely split-DNS config. See

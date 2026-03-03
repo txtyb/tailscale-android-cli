@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !windows && !plan9
@@ -184,14 +184,14 @@ type ipMapping struct {
 // it is difficult to be 100% sure. This function should be used with care. It
 // will probably do what you want, but it is very easy to hold this wrong.
 func getProbablyFreePortNumber() (int, error) {
-	l, err := net.Listen("tcp", ":0")
+	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return 0, err
 	}
 
-	defer l.Close()
+	defer ln.Close()
 
-	_, port, err := net.SplitHostPort(l.Addr().String())
+	_, port, err := net.SplitHostPort(ln.Addr().String())
 	if err != nil {
 		return 0, err
 	}

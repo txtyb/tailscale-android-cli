@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux
@@ -582,7 +582,7 @@ func (r *linuxRouter) updateMagicsockPort(port uint16, network string) error {
 	}
 
 	if port != 0 {
-		if err := r.nfr.AddMagicsockPortRule(*magicsockPort, network); err != nil {
+		if err := r.nfr.AddMagicsockPortRule(port, network); err != nil {
 			return fmt.Errorf("add magicsock port rule: %w", err)
 		}
 	}
@@ -1676,7 +1676,7 @@ func checkOpenWRTUsingMWAN3() (bool, error) {
 		// We want to match on a rule like this:
 		//    2001:	from all fwmark 0x100/0x3f00 lookup 1
 		//
-		// We dont match on the mask because it can vary, or the
+		// We don't match on the mask because it can vary, or the
 		// table because I'm not sure if it can vary.
 		if r.Priority >= 2001 && r.Priority <= 2004 && r.Mark != 0 {
 			return true, nil

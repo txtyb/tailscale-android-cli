@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package controlclient
@@ -19,6 +19,32 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/util/eventbus/eventbustest"
 )
+
+func TestSetDiscoPublicKey(t *testing.T) {
+	initialKey := key.NewDisco().Public()
+
+	c := &Direct{
+		discoPubKey: initialKey,
+	}
+
+	c.mu.Lock()
+	if c.discoPubKey != initialKey {
+		t.Fatalf("initial disco key mismatch: got %v, want %v", c.discoPubKey, initialKey)
+	}
+	c.mu.Unlock()
+
+	newKey := key.NewDisco().Public()
+	c.SetDiscoPublicKey(newKey)
+
+	c.mu.Lock()
+	if c.discoPubKey != newKey {
+		t.Fatalf("disco key not updated: got %v, want %v", c.discoPubKey, newKey)
+	}
+	if c.discoPubKey == initialKey {
+		t.Fatal("disco key should have changed")
+	}
+	c.mu.Unlock()
+}
 
 func TestNewDirect(t *testing.T) {
 	hi := hostinfo.New()

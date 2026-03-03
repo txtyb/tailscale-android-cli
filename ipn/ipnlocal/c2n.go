@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipnlocal
@@ -179,7 +179,6 @@ func handleC2NDebugNetMap(b *LocalBackend, w http.ResponseWriter, r *http.Reques
 			}
 			field.SetZero()
 		}
-		nm, _ = redactNetmapPrivateKeys(nm)
 		return json.Marshal(nm)
 	}
 

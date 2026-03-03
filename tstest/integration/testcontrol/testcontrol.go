@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package testcontrol contains a minimal control plane server for testing purposes.
@@ -33,6 +33,8 @@ import (
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
+	"tailscale.com/tka"
+	"tailscale.com/tstest/tkatest"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/opt"
@@ -79,6 +81,10 @@ type Server struct {
 	ExplicitBaseURL string           // e.g. "http://127.0.0.1:1234" with no trailing URL
 	HTTPTestServer  *httptest.Server // if non-nil, used to get BaseURL
 
+	// ModifyFirstMapResponse, if non-nil, is called exactly once per
+	// MapResponse stream to modify the first MapResponse sent in response to it.
+	ModifyFirstMapResponse func(*tailcfg.MapResponse, *tailcfg.MapRequest)
+
 	initMuxOnce sync.Once
 	mux         *http.ServeMux
 
@@ -104,6 +110,16 @@ type Server struct {
 	// nodeCapMaps overrides the capability map sent down to a client.
 	nodeCapMaps map[key.NodePublic]tailcfg.NodeCapMap
 
+	// globalAppCaps configures global app capabilities, equivalent to:
+	//	"grants": [
+	//	   {
+	//	     "src": ["*"],
+	//	     "dst": ["*"],
+	//	     "app": <contents of the input map>
+	//	   }
+	//	]
+	globalAppCaps tailcfg.PeerCapMap
+
 	// suppressAutoMapResponses is the set of nodes that should not be sent
 	// automatic map responses from serveMap. (They should only get manually sent ones)
 	suppressAutoMapResponses set.Set[key.NodePublic]
@@ -119,6 +135,10 @@ type Server struct {
 	nodeKeyAuthed set.Set[key.NodePublic]
 	msgToSend     map[key.NodePublic]any // value is *tailcfg.PingRequest or entire *tailcfg.MapResponse
 	allExpired    bool                   // All nodes will be told their node key is expired.
+
+	// tkaStorage records the Tailnet Lock state, if any.
+	// If nil, Tailnet Lock is not enabled in the Tailnet.
+	tkaStorage tka.CompactableChonk
 }
 
 // BaseURL returns the server's base URL, without trailing slash.
@@ -325,6 +345,7 @@ func (s *Server) initMux() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	s.mux.HandleFunc("/key", s.serveKey)
+	s.mux.HandleFunc("/machine/tka/", s.serveTKA)
 	s.mux.HandleFunc("/machine/", s.serveMachine)
 	s.mux.HandleFunc("/ts2021", s.serveNoiseUpgrade)
 	s.mux.HandleFunc("/c2n/", s.serveC2N)
@@ -435,7 +456,7 @@ func (s *Server) serveKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveMachine(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		http.Error(w, "POST required", 400)
+		http.Error(w, "POST required for serveMachine", 400)
 		return
 	}
 	ctx := r.Context()
@@ -464,6 +485,9 @@ func (s *Server) SetSubnetRoutes(nodeKey key.NodePublic, routes []netip.Prefix) 
 	defer s.mu.Unlock()
 	s.logf("Setting subnet routes for %s: %v", nodeKey.ShortString(), routes)
 	mak.Set(&s.nodeSubnetRoutes, nodeKey, routes)
+	if node, ok := s.nodes[nodeKey]; ok {
+		sendUpdate(s.updates[node.ID], updateSelfChanged)
+	}
 }
 
 // MasqueradePair is a pair of nodes and the IP address that the
@@ -515,6 +539,33 @@ func (s *Server) SetNodeCapMap(nodeKey key.NodePublic, capMap tailcfg.NodeCapMap
 	defer s.mu.Unlock()
 	mak.Set(&s.nodeCapMaps, nodeKey, capMap)
 	s.updateLocked("SetNodeCapMap", s.nodeIDsLocked(0))
+}
+
+// SetGlobalAppCaps configures global app capabilities. This is equivalent to
+//
+//	"grants": [
+//	   {
+//	     "src": ["*"],
+//	     "dst": ["*"],
+//	     "app": <contents of the input map>
+//	   }
+//	]
+func (s *Server) SetGlobalAppCaps(appCaps tailcfg.PeerCapMap) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.globalAppCaps = appCaps
+	s.updateLocked("SetGlobalAppCaps", s.nodeIDsLocked(0))
+}
+
+// AddDNSRecords adds records to the server's DNS config.
+func (s *Server) AddDNSRecords(records ...tailcfg.DNSRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.DNSConfig == nil {
+		s.DNSConfig = new(tailcfg.DNSConfig)
+	}
+	s.DNSConfig.ExtraRecords = append(s.DNSConfig.ExtraRecords, records...)
+	s.updateLocked("AddDNSRecords", s.nodeIDsLocked(0))
 }
 
 // nodeIDsLocked returns the node IDs of all nodes in the server, except
@@ -824,6 +875,9 @@ func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request, mkey key.
 			CapMap:            capMap,
 			Capabilities:      slices.Collect(maps.Keys(capMap)),
 		}
+		if s.MagicDNSDomain != "" {
+			node.Name = node.Name + "." + s.MagicDNSDomain + "."
+		}
 		s.nodes[nk] = node
 	}
 	requireAuth := s.RequireAuth
@@ -852,6 +906,132 @@ func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request, mkey key.
 	}
 	w.WriteHeader(200)
 	w.Write(res)
+}
+
+func (s *Server) serveTKA(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "GET required for serveTKA", 400)
+		return
+	}
+
+	switch r.URL.Path {
+	case "/machine/tka/init/begin":
+		s.serveTKAInitBegin(w, r)
+	case "/machine/tka/init/finish":
+		s.serveTKAInitFinish(w, r)
+	case "/machine/tka/bootstrap":
+		s.serveTKABootstrap(w, r)
+	case "/machine/tka/sync/offer":
+		s.serveTKASyncOffer(w, r)
+	case "/machine/tka/sign":
+		s.serveTKASign(w, r)
+	default:
+		s.serveUnhandled(w, r)
+	}
+}
+
+func (s *Server) serveTKAInitBegin(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nodes := maps.Values(s.nodes)
+	genesisAUM, err := tkatest.HandleTKAInitBegin(w, r, nodes)
+	if err != nil {
+		go panic(fmt.Sprintf("HandleTKAInitBegin: %v", err))
+	}
+	s.tkaStorage = tka.ChonkMem()
+	s.tkaStorage.CommitVerifiedAUMs([]tka.AUM{*genesisAUM})
+}
+
+func (s *Server) serveTKAInitFinish(w http.ResponseWriter, r *http.Request) {
+	signatures, err := tkatest.HandleTKAInitFinish(w, r)
+	if err != nil {
+		go panic(fmt.Sprintf("HandleTKAInitFinish: %v", err))
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Apply the signatures to each of the nodes. Because s.nodes is keyed
+	// by public key instead of node ID, we have to do this inefficiently.
+	//
+	// We only have small tailnets in the integration tests, so this isn't
+	// much of an issue.
+	for nodeID, sig := range signatures {
+		for _, n := range s.nodes {
+			if n.ID == nodeID {
+				n.KeySignature = sig
+			}
+		}
+	}
+}
+
+func (s *Server) serveTKABootstrap(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tkaStorage == nil {
+		http.Error(w, "no TKA state when calling serveTKABootstrap", 400)
+		return
+	}
+
+	// Find the genesis AUM, which we need to include in the response.
+	var genesis *tka.AUM
+	allAUMs, err := s.tkaStorage.AllAUMs()
+	if err != nil {
+		http.Error(w, "unable to retrieve all AUMs from TKA state", 500)
+		return
+	}
+	for _, h := range allAUMs {
+		aum := must.Get(s.tkaStorage.AUM(h))
+		if _, hasParent := aum.Parent(); !hasParent {
+			genesis = &aum
+			break
+		}
+	}
+	if genesis == nil {
+		http.Error(w, "unable to find genesis AUM in TKA state", 500)
+		return
+	}
+
+	resp := tailcfg.TKABootstrapResponse{
+		GenesisAUM: genesis.Serialize(),
+	}
+	_, err = tkatest.HandleTKABootstrap(w, r, resp)
+	if err != nil {
+		go panic(fmt.Sprintf("HandleTKABootstrap: %v", err))
+	}
+}
+
+func (s *Server) serveTKASyncOffer(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	authority, err := tka.Open(s.tkaStorage)
+	if err != nil {
+		go panic(fmt.Sprintf("serveTKASyncOffer: tka.Open: %v", err))
+	}
+
+	err = tkatest.HandleTKASyncOffer(w, r, authority, s.tkaStorage)
+	if err != nil {
+		go panic(fmt.Sprintf("HandleTKASyncOffer: %v", err))
+	}
+}
+
+func (s *Server) serveTKASign(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	authority, err := tka.Open(s.tkaStorage)
+	if err != nil {
+		go panic(fmt.Sprintf("serveTKASign: tka.Open: %v", err))
+	}
+
+	sig, keyBeingSigned, err := tkatest.HandleTKASign(w, r, authority)
+	if err != nil {
+		go panic(fmt.Sprintf("HandleTKASign: %v", err))
+	}
+	s.nodes[*keyBeingSigned].KeySignature = *sig
+	s.updateLocked("TKASign", s.nodeIDsLocked(0))
 }
 
 // updateType indicates why a long-polling map request is being woken
@@ -895,14 +1075,21 @@ func sendUpdate(dst chan<- updateType, updateType updateType) bool {
 	}
 }
 
-func (s *Server) UpdateNode(n *tailcfg.Node) (peersToUpdate []tailcfg.NodeID) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Server) updateNodeLocked(n *tailcfg.Node) (peersToUpdate []tailcfg.NodeID) {
 	if n.Key.IsZero() {
 		panic("zero nodekey")
 	}
 	s.nodes[n.Key] = n.Clone()
 	return s.nodeIDsLocked(n.ID)
+}
+
+// UpdateNode updates or adds the input node, then triggers a netmap update for
+// all attached streaming clients.
+func (s *Server) UpdateNode(n *tailcfg.Node) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateNodeLocked(n)
+	s.updateLocked("UpdateNode", s.nodeIDsLocked(0))
 }
 
 func (s *Server) incrInServeMap(delta int) {
@@ -963,7 +1150,9 @@ func (s *Server) serveMap(w http.ResponseWriter, r *http.Request, mkey key.Machi
 				}
 			}
 		}
-		peersToUpdate = s.UpdateNode(node)
+		s.mu.Lock()
+		peersToUpdate = s.updateNodeLocked(node)
+		s.mu.Unlock()
 	}
 
 	nodeID := node.ID
@@ -990,6 +1179,7 @@ func (s *Server) serveMap(w http.ResponseWriter, r *http.Request, mkey key.Machi
 	// register an updatesCh to get updates.
 	streaming := req.Stream && !req.ReadOnly
 	compress := req.Compress != ""
+	first := true
 
 	w.WriteHeader(200)
 	for {
@@ -1021,6 +1211,10 @@ func (s *Server) serveMap(w http.ResponseWriter, r *http.Request, mkey key.Machi
 			s.mu.Unlock()
 			if allExpired {
 				res.Node.KeyExpiry = time.Now().Add(-1 * time.Minute)
+			}
+			if f := s.ModifyFirstMapResponse; first && f != nil {
+				first = false
+				f(res, req)
 			}
 			// TODO: add minner if/when needed
 			resBytes, err := json.Marshal(res)
@@ -1107,18 +1301,19 @@ func (s *Server) MapResponse(req *tailcfg.MapRequest) (res *tailcfg.MapResponse,
 
 	s.mu.Lock()
 	nodeCapMap := maps.Clone(s.nodeCapMaps[nk])
+	var dns *tailcfg.DNSConfig
+	if s.DNSConfig != nil {
+		dns = s.DNSConfig.Clone()
+	}
+	magicDNSDomain := s.MagicDNSDomain
 	s.mu.Unlock()
 
 	node.CapMap = nodeCapMap
 	node.Capabilities = append(node.Capabilities, tailcfg.NodeAttrDisableUPnP)
 
 	t := time.Date(2020, 8, 3, 0, 0, 0, 1, time.UTC)
-	dns := s.DNSConfig
-	if dns != nil && s.MagicDNSDomain != "" {
-		dns = dns.Clone()
-		dns.CertDomains = []string{
-			node.Hostinfo.Hostname() + "." + s.MagicDNSDomain,
-		}
+	if dns != nil && magicDNSDomain != "" {
+		dns.CertDomains = append(dns.CertDomains, node.Hostinfo.Hostname()+"."+magicDNSDomain)
 	}
 
 	res = &tailcfg.MapResponse{
@@ -1134,6 +1329,7 @@ func (s *Server) MapResponse(req *tailcfg.MapRequest) (res *tailcfg.MapResponse,
 	s.mu.Lock()
 	nodeMasqs := s.masquerades[node.Key]
 	jailed := maps.Clone(s.peerIsJailed[node.Key])
+	globalAppCaps := s.globalAppCaps
 	s.mu.Unlock()
 	for _, p := range s.AllNodes() {
 		if p.StableID == node.StableID {
@@ -1183,6 +1379,33 @@ func (s *Server) MapResponse(req *tailcfg.MapRequest) (res *tailcfg.MapResponse,
 	res.Node.Addresses = []netip.Prefix{
 		v4Prefix,
 		v6Prefix,
+	}
+
+	if globalAppCaps != nil {
+		res.PacketFilter = append(res.PacketFilter, tailcfg.FilterRule{
+			SrcIPs: []string{"*"},
+			CapGrant: []tailcfg.CapGrant{
+				{
+					Dsts:   []netip.Prefix{tsaddr.AllIPv4(), tsaddr.AllIPv6()},
+					CapMap: globalAppCaps,
+				},
+			},
+		})
+	}
+
+	// If the server is tracking TKA state, and there's a single TKA head,
+	// add it to the MapResponse.
+	if s.tkaStorage != nil {
+		heads, err := s.tkaStorage.Heads()
+		if err != nil {
+			log.Printf("unable to get TKA heads: %v", err)
+		} else if len(heads) != 1 {
+			log.Printf("unable to get single TKA head, got %v", heads)
+		} else {
+			res.TKAInfo = &tailcfg.TKAInfo{
+				Head: heads[0].Hash().String(),
+			}
+		}
 	}
 
 	s.mu.Lock()

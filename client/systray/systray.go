@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build cgo || !darwin
@@ -66,8 +66,8 @@ func (menu *Menu) Run(client *local.Client) {
 		case <-menu.bgCtx.Done():
 		}
 	}()
-	go menu.lc.IncrementGauge(menu.bgCtx, "systray_running", 1)
-	defer menu.lc.IncrementGauge(menu.bgCtx, "systray_running", -1)
+	go menu.lc.SetGauge(menu.bgCtx, "systray_running", 1)
+	defer menu.lc.SetGauge(menu.bgCtx, "systray_running", 0)
 
 	systray.Run(menu.onReady, menu.onExit)
 }
@@ -158,7 +158,24 @@ func init() {
 // onReady is called by the systray package when the menu is ready to be built.
 func (menu *Menu) onReady() {
 	log.Printf("starting")
+	if os.Getuid() == 0 || os.Getuid() != os.Geteuid() || os.Getenv("SUDO_USER") != "" || os.Getenv("DOAS_USER") != "" {
+		fmt.Fprintln(os.Stderr, `
+It appears that you might be running the systray with sudo/doas.
+This can lead to issues with D-Bus, and should be avoided.
+
+The systray application should be run with the same user as your desktop session.
+This usually means that you should run the application like:
+
+tailscale systray
+
+See https://tailscale.com/kb/1597/linux-systray for more information.`)
+	}
 	setAppIcon(disconnected)
+
+	// set initial title, which is used by the systray package as the ID of the StatusNotifierItem.
+	// This value will get overwritten later as the client status changes.
+	systray.SetTitle("tailscale")
+
 	menu.rebuild()
 
 	menu.mu.Lock()
@@ -360,6 +377,7 @@ func setRemoteIcon(menu *systray.MenuItem, urlStr string) {
 	}
 
 	cacheMu.Lock()
+	defer cacheMu.Unlock()
 	b, ok := httpCache[urlStr]
 	if !ok {
 		resp, err := http.Get(urlStr)
@@ -383,7 +401,6 @@ func setRemoteIcon(menu *systray.MenuItem, urlStr string) {
 			resp.Body.Close()
 		}
 	}
-	cacheMu.Unlock()
 
 	if len(b) > 0 {
 		menu.SetIcon(b)
@@ -500,7 +517,7 @@ func (menu *Menu) watchIPNBus() {
 }
 
 func (menu *Menu) watchIPNBusInner() error {
-	watcher, err := menu.lc.WatchIPNBus(menu.bgCtx, ipn.NotifyNoPrivateKeys)
+	watcher, err := menu.lc.WatchIPNBus(menu.bgCtx, 0)
 	if err != nil {
 		return fmt.Errorf("watching ipn bus: %w", err)
 	}
@@ -513,6 +530,15 @@ func (menu *Menu) watchIPNBusInner() error {
 			n, err := watcher.Next()
 			if err != nil {
 				return fmt.Errorf("ipnbus error: %w", err)
+			}
+			if url := n.BrowseToURL; url != nil {
+				// Avoid opening the browser when running as root, just in case.
+				runningAsRoot := os.Getuid() == 0
+				if !runningAsRoot {
+					if err := webbrowser.Open(*url); err != nil {
+						log.Printf("failed to open BrowseToURL: %v", err)
+					}
+				}
 			}
 			var rebuild bool
 			if n.State != nil {

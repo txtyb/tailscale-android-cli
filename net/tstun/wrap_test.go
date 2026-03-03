@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tstun
@@ -36,9 +36,12 @@ import (
 	"tailscale.com/types/netlogtype"
 	"tailscale.com/types/ptr"
 	"tailscale.com/types/views"
+	"tailscale.com/util/eventbus"
+	"tailscale.com/util/eventbus/eventbustest"
 	"tailscale.com/util/must"
 	"tailscale.com/util/usermetric"
 	"tailscale.com/wgengine/filter"
+	"tailscale.com/wgengine/netstack/gro"
 	"tailscale.com/wgengine/wgcfg"
 )
 
@@ -170,10 +173,10 @@ func setfilter(logf logger.Logf, tun *Wrapper) {
 	tun.SetFilter(filter.New(matches, nil, ipSet, ipSet, nil, logf))
 }
 
-func newChannelTUN(logf logger.Logf, secure bool) (*tuntest.ChannelTUN, *Wrapper) {
+func newChannelTUN(logf logger.Logf, bus *eventbus.Bus, secure bool) (*tuntest.ChannelTUN, *Wrapper) {
 	chtun := tuntest.NewChannelTUN()
 	reg := new(usermetric.Registry)
-	tun := Wrap(logf, chtun.TUN(), reg)
+	tun := Wrap(logf, chtun.TUN(), reg, bus)
 	if secure {
 		setfilter(logf, tun)
 	} else {
@@ -183,10 +186,10 @@ func newChannelTUN(logf logger.Logf, secure bool) (*tuntest.ChannelTUN, *Wrapper
 	return chtun, tun
 }
 
-func newFakeTUN(logf logger.Logf, secure bool) (*fakeTUN, *Wrapper) {
+func newFakeTUN(logf logger.Logf, bus *eventbus.Bus, secure bool) (*fakeTUN, *Wrapper) {
 	ftun := NewFake()
 	reg := new(usermetric.Registry)
-	tun := Wrap(logf, ftun, reg)
+	tun := Wrap(logf, ftun, reg, bus)
 	if secure {
 		setfilter(logf, tun)
 	} else {
@@ -196,7 +199,8 @@ func newFakeTUN(logf logger.Logf, secure bool) (*fakeTUN, *Wrapper) {
 }
 
 func TestReadAndInject(t *testing.T) {
-	chtun, tun := newChannelTUN(t.Logf, false)
+	bus := eventbustest.NewBus(t)
+	chtun, tun := newChannelTUN(t.Logf, bus, false)
 	defer tun.Close()
 
 	const size = 2 // all payloads have this size
@@ -221,7 +225,7 @@ func TestReadAndInject(t *testing.T) {
 	}
 
 	var buf [MaxPacketSize]byte
-	var seen = make(map[string]bool)
+	seen := make(map[string]bool)
 	sizes := make([]int, 1)
 	// We expect the same packets back, in no particular order.
 	for i := range len(written) + len(injected) {
@@ -257,7 +261,8 @@ func TestReadAndInject(t *testing.T) {
 }
 
 func TestWriteAndInject(t *testing.T) {
-	chtun, tun := newChannelTUN(t.Logf, false)
+	bus := eventbustest.NewBus(t)
+	chtun, tun := newChannelTUN(t.Logf, bus, false)
 	defer tun.Close()
 
 	written := []string{"w0", "w1"}
@@ -316,8 +321,8 @@ func mustHexDecode(s string) []byte {
 }
 
 func TestFilter(t *testing.T) {
-
-	chtun, tun := newChannelTUN(t.Logf, true)
+	bus := eventbustest.NewBus(t)
+	chtun, tun := newChannelTUN(t.Logf, bus, true)
 	defer tun.Close()
 
 	// Reset the metrics before test. These are global
@@ -462,7 +467,8 @@ func assertMetricPackets(t *testing.T, metricName string, want, got int64) {
 }
 
 func TestAllocs(t *testing.T) {
-	ftun, tun := newFakeTUN(t.Logf, false)
+	bus := eventbustest.NewBus(t)
+	ftun, tun := newFakeTUN(t.Logf, bus, false)
 	defer tun.Close()
 
 	buf := [][]byte{{0x00}}
@@ -473,14 +479,14 @@ func TestAllocs(t *testing.T) {
 			return
 		}
 	})
-
 	if err != nil {
 		t.Error(err)
 	}
 }
 
 func TestClose(t *testing.T) {
-	ftun, tun := newFakeTUN(t.Logf, false)
+	bus := eventbustest.NewBus(t)
+	ftun, tun := newFakeTUN(t.Logf, bus, false)
 
 	data := [][]byte{udp4("1.2.3.4", "5.6.7.8", 98, 98)}
 	_, err := ftun.Write(data, 0)
@@ -497,7 +503,8 @@ func TestClose(t *testing.T) {
 
 func BenchmarkWrite(b *testing.B) {
 	b.ReportAllocs()
-	ftun, tun := newFakeTUN(b.Logf, true)
+	bus := eventbustest.NewBus(b)
+	ftun, tun := newFakeTUN(b.Logf, bus, true)
 	defer tun.Close()
 
 	packet := [][]byte{udp4("5.6.7.8", "1.2.3.4", 89, 89)}
@@ -887,7 +894,8 @@ func TestCaptureHook(t *testing.T) {
 
 	now := time.Unix(1682085856, 0)
 
-	_, w := newFakeTUN(t.Logf, true)
+	bus := eventbustest.NewBus(t)
+	_, w := newFakeTUN(t.Logf, bus, true)
 	w.timeNow = func() time.Time {
 		return now
 	}
@@ -955,5 +963,96 @@ func TestCaptureHook(t *testing.T) {
 	if !reflect.DeepEqual(captured, want) {
 		t.Errorf("mismatch between captured and expected packets\ngot: %+v\nwant: %+v",
 			captured, want)
+	}
+}
+
+func TestTSMPDisco(t *testing.T) {
+	t.Run("IPv6DiscoAdvert", func(t *testing.T) {
+		src := netip.MustParseAddr("2001:db8::1")
+		dst := netip.MustParseAddr("2001:db8::2")
+		discoKey := key.NewDisco()
+		buf, _ := (&packet.TSMPDiscoKeyAdvertisement{
+			Src: src,
+			Dst: dst,
+			Key: discoKey.Public(),
+		}).Marshal()
+
+		var p packet.Parsed
+		p.Decode(buf)
+
+		tda, ok := p.AsTSMPDiscoAdvertisement()
+		if !ok {
+			t.Error("Unable to parse message as TSMPDiscoAdversitement")
+		}
+		if tda.Src != src {
+			t.Errorf("Src address did not match, expected %v, got %v", src, tda.Src)
+		}
+		if tda.Key.Compare(discoKey.Public()) != 0 {
+			t.Errorf("Key did not match, expected %q, got %q", discoKey.Public(), tda.Key)
+		}
+	})
+}
+
+func TestInterceptOrdering(t *testing.T) {
+	bus := eventbustest.NewBus(t)
+	chtun, tun := newChannelTUN(t.Logf, bus, true)
+	defer tun.Close()
+
+	var seq uint8
+	orderedFilterFn := func(expected uint8) FilterFunc {
+		return func(_ *packet.Parsed, _ *Wrapper) filter.Response {
+			seq++
+			if expected != seq {
+				t.Errorf("got sequence %d; want %d", seq, expected)
+			}
+			return filter.Accept
+		}
+	}
+
+	ordereredGROFilterFn := func(expected uint8) GROFilterFunc {
+		return func(_ *packet.Parsed, _ *Wrapper, _ *gro.GRO) (filter.Response, *gro.GRO) {
+			seq++
+			if expected != seq {
+				t.Errorf("got sequence %d; want %d", seq, expected)
+			}
+			return filter.Accept, nil
+		}
+	}
+
+	// As the number of inbound intercepts change,
+	// this value should change.
+	numInboundIntercepts := uint8(3)
+
+	tun.PreFilterPacketInboundFromWireGuard = orderedFilterFn(1)
+	tun.PostFilterPacketInboundFromWireGuardAppConnector = orderedFilterFn(2)
+	tun.PostFilterPacketInboundFromWireGuard = ordereredGROFilterFn(3)
+
+	// Write the packet.
+	go func() { <-chtun.Inbound }() // Simulate tun device receiving.
+	packet := [][]byte{udp4("5.6.7.8", "1.2.3.4", 89, 89)}
+	tun.Write(packet, 0)
+
+	if seq != numInboundIntercepts {
+		t.Errorf("got number of intercepts run in Write(): %d; want: %d", seq, numInboundIntercepts)
+	}
+
+	// As the number of inbound intercepts change,
+	// this value should change.
+	numOutboundIntercepts := uint8(4)
+
+	seq = 0
+	tun.PreFilterPacketOutboundToWireGuardNetstackIntercept = ordereredGROFilterFn(1)
+	tun.PreFilterPacketOutboundToWireGuardEngineIntercept = orderedFilterFn(2)
+	tun.PreFilterPacketOutboundToWireGuardAppConnectorIntercept = orderedFilterFn(3)
+	tun.PostFilterPacketOutboundToWireGuard = orderedFilterFn(4)
+
+	// Read the packet.
+	var buf [MaxPacketSize]byte
+	sizes := make([]int, 1)
+	chtun.Outbound <- udp4("1.2.3.4", "5.6.7.8", 98, 98) // Simulate tun device sending.
+	tun.Read([][]byte{buf[:]}, sizes, 0)
+
+	if seq != numOutboundIntercepts {
+		t.Errorf("got number of intercepts run in Read(): %d; want: %d", seq, numOutboundIntercepts)
 	}
 }

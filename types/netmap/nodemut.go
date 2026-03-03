@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package netmap
@@ -177,5 +177,5 @@ func mapResponseContainsNonPatchFields(res *tailcfg.MapResponse) bool {
 		// function is called, so it should never be set anyway. But for
 		// completedness, and for tests, check it too:
 		res.PeersChanged != nil ||
-		res.DefaultAutoUpdate != ""
+		res.DeprecatedDefaultAutoUpdate != ""
 }

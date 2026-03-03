@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !ts_omit_tailnetlock
@@ -114,7 +114,7 @@ func (b *UpdateBuilder) generateCheckpoint() error {
 		}
 	}
 
-	// Checkpoints cant specify a parent AUM.
+	// Checkpoints can't specify a parent AUM.
 	state.LastAUMHash = nil
 	return b.mkUpdate(AUM{MessageKind: AUMCheckpoint, State: &state})
 }
@@ -136,7 +136,7 @@ func (b *UpdateBuilder) Finalize(storage Chonk) ([]AUM, error) {
 				needCheckpoint = false
 				break
 			}
-			return nil, fmt.Errorf("reading AUM: %v", err)
+			return nil, fmt.Errorf("reading AUM (%v): %v", cursor, err)
 		}
 
 		if aum.MessageKind == AUMCheckpoint {

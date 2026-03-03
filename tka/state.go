@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !ts_omit_tailnetlock
@@ -140,7 +140,7 @@ func (s State) checkDisablement(secret []byte) bool {
 // Specifically, the rules are:
 //   - The last AUM hash must match (transitively, this implies that this
 //     update follows the last update message applied to the state machine)
-//   - Or, the state machine knows no parent (its brand new).
+//   - Or, the state machine knows no parent (it's brand new).
 func (s State) parentMatches(update AUM) bool {
 	if s.LastAUMHash == nil {
 		return true

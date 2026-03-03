@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package health is a registry for other packages to report & check
@@ -20,6 +20,7 @@ import (
 
 	"tailscale.com/envknob"
 	"tailscale.com/feature/buildfeatures"
+	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstime"
 	"tailscale.com/types/opt"
@@ -30,7 +31,7 @@ import (
 )
 
 var (
-	mu           sync.Mutex
+	mu           syncs.Mutex
 	debugHandler map[string]http.Handler
 )
 

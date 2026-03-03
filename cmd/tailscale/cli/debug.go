@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package cli
@@ -125,6 +125,12 @@ func debugCmd() *ffcli.Command {
 				})(),
 			},
 			{
+				Name:       "daemon-bus-queues",
+				ShortUsage: "tailscale debug daemon-bus-queues",
+				Exec:       runDaemonBusQueues,
+				ShortHelp:  "Print event bus queue depths per client",
+			},
+			{
 				Name:       "metrics",
 				ShortUsage: "tailscale debug metrics",
 				Exec:       runDaemonMetrics,
@@ -181,6 +187,12 @@ func debugCmd() *ffcli.Command {
 				ShortUsage: "tailscale debug rebind",
 				Exec:       localAPIAction("rebind"),
 				ShortHelp:  "Force a magicsock rebind",
+			},
+			{
+				Name:       "rotate-disco-key",
+				ShortUsage: "tailscale debug rotate-disco-key",
+				Exec:       localAPIAction("rotate-disco-key"),
+				ShortHelp:  "Rotate the discovery key",
 			},
 			{
 				Name:       "derp-set-on-demand",
@@ -257,8 +269,7 @@ func debugCmd() *ffcli.Command {
 					fs := newFlagSet("watch-ipn")
 					fs.BoolVar(&watchIPNArgs.netmap, "netmap", true, "include netmap in messages")
 					fs.BoolVar(&watchIPNArgs.initial, "initial", false, "include initial status")
-					fs.BoolVar(&watchIPNArgs.rateLimit, "rate-limit", true, "rate limit messags")
-					fs.BoolVar(&watchIPNArgs.showPrivateKey, "show-private-key", false, "include node private key in printed netmap")
+					fs.BoolVar(&watchIPNArgs.rateLimit, "rate-limit", true, "rate limit messages")
 					fs.IntVar(&watchIPNArgs.count, "count", 0, "exit after printing this many statuses, or 0 to keep going forever")
 					return fs
 				})(),
@@ -270,7 +281,6 @@ func debugCmd() *ffcli.Command {
 				ShortHelp:  "Print the current network map",
 				FlagSet: (func() *flag.FlagSet {
 					fs := newFlagSet("netmap")
-					fs.BoolVar(&netmapArgs.showPrivateKey, "show-private-key", false, "include node private key in printed netmap")
 					return fs
 				})(),
 			},
@@ -614,20 +624,16 @@ func runPrefs(ctx context.Context, args []string) error {
 }
 
 var watchIPNArgs struct {
-	netmap         bool
-	initial        bool
-	showPrivateKey bool
-	rateLimit      bool
-	count          int
+	netmap    bool
+	initial   bool
+	rateLimit bool
+	count     int
 }
 
 func runWatchIPN(ctx context.Context, args []string) error {
 	var mask ipn.NotifyWatchOpt
 	if watchIPNArgs.initial {
 		mask = ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyInitialNetMap
-	}
-	if !watchIPNArgs.showPrivateKey {
-		mask |= ipn.NotifyNoPrivateKeys
 	}
 	if watchIPNArgs.rateLimit {
 		mask |= ipn.NotifyRateLimit
@@ -652,18 +658,11 @@ func runWatchIPN(ctx context.Context, args []string) error {
 	return nil
 }
 
-var netmapArgs struct {
-	showPrivateKey bool
-}
-
 func runNetmap(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var mask ipn.NotifyWatchOpt = ipn.NotifyInitialNetMap
-	if !netmapArgs.showPrivateKey {
-		mask |= ipn.NotifyNoPrivateKeys
-	}
 	watcher, err := localClient.WatchIPNBus(ctx, mask)
 	if err != nil {
 		return err
@@ -844,6 +843,15 @@ func runDaemonBusGraph(ctx context.Context, args []string) error {
 	} else {
 		fmt.Print(string(graph))
 	}
+	return nil
+}
+
+func runDaemonBusQueues(ctx context.Context, args []string) error {
+	data, err := localClient.EventBusQueues(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(data))
 	return nil
 }
 

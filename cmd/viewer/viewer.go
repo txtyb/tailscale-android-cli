@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Viewer is a tool to automate the creation of "view" wrapper types that
@@ -367,14 +367,21 @@ func genView(buf *bytes.Buffer, it *codegen.ImportTracker, typ *types.Named, fie
 			case *types.Struct, *types.Named, *types.Alias:
 				strucT := u
 				args.FieldType = it.QualifiedName(fieldType)
-				if codegen.ContainsPointers(strucT) {
+
+				// We need to call View() unless the type is
+				// either a View itself or does not contain
+				// pointers (and can thus be shallow-copied).
+				//
+				// Otherwise, we need to create a View of the
+				// map value.
+				if codegen.IsViewType(strucT) || !codegen.ContainsPointers(strucT) {
+					template = "mapField"
+					args.MapValueType = it.QualifiedName(mElem)
+				} else {
 					args.MapFn = "t.View()"
 					template = "mapFnField"
 					args.MapValueType = it.QualifiedName(mElem)
 					args.MapValueView = appendNameSuffix(args.MapValueType, "View")
-				} else {
-					template = "mapField"
-					args.MapValueType = it.QualifiedName(mElem)
 				}
 			case *types.Basic:
 				template = "mapField"

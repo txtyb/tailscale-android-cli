@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package expvarx provides some extensions to the [expvar] package.
@@ -7,9 +7,9 @@ package expvarx
 import (
 	"encoding/json"
 	"expvar"
-	"sync"
 	"time"
 
+	"tailscale.com/syncs"
 	"tailscale.com/types/lazy"
 )
 
@@ -20,7 +20,7 @@ type SafeFunc struct {
 	limit  time.Duration
 	onSlow func(time.Duration, any)
 
-	mu       sync.Mutex
+	mu       syncs.Mutex
 	inflight *lazy.SyncValue[any]
 }
 

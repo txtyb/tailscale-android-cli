@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tstun
@@ -34,6 +34,7 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netlogfunc"
 	"tailscale.com/util/clientmetric"
+	"tailscale.com/util/eventbus"
 	"tailscale.com/util/usermetric"
 	"tailscale.com/wgengine/filter"
 	"tailscale.com/wgengine/netstack/gro"
@@ -170,6 +171,9 @@ type Wrapper struct {
 	// PreFilterPacketInboundFromWireGuard is the inbound filter function that runs before the main filter
 	// and therefore sees the packets that may be later dropped by it.
 	PreFilterPacketInboundFromWireGuard FilterFunc
+	// PostFilterPacketInboundFromWireGuardAppConnector runs after the filter, but before PostFilterPacketInboundFromWireGuard.
+	// Non-app connector traffic is passed along. Invalid app connector traffic is dropped.
+	PostFilterPacketInboundFromWireGuardAppConnector FilterFunc
 	// PostFilterPacketInboundFromWireGuard is the inbound filter function that runs after the main filter.
 	PostFilterPacketInboundFromWireGuard GROFilterFunc
 	// PreFilterPacketOutboundToWireGuardNetstackIntercept is a filter function that runs before the main filter
@@ -182,6 +186,10 @@ type Wrapper struct {
 	// packets which it handles internally. If both this and PreFilterFromTunToNetstack
 	// filter functions are non-nil, this filter runs second.
 	PreFilterPacketOutboundToWireGuardEngineIntercept FilterFunc
+	// PreFilterPacketOutboundToWireGuardAppConnectorIntercept runs after PreFilterPacketOutboundToWireGuardEngineIntercept
+	// for app connector specific traffic. Non-app connector traffic is passed along. Invalid app connector traffic is
+	// dropped.
+	PreFilterPacketOutboundToWireGuardAppConnectorIntercept FilterFunc
 	// PostFilterPacketOutboundToWireGuard is the outbound filter function that runs after the main filter.
 	PostFilterPacketOutboundToWireGuard FilterFunc
 
@@ -209,6 +217,9 @@ type Wrapper struct {
 	captureHook syncs.AtomicValue[packet.CaptureCallback]
 
 	metrics *metrics
+
+	eventClient              *eventbus.Client
+	discoKeyAdvertisementPub *eventbus.Publisher[DiscoKeyAdvertisement]
 }
 
 type metrics struct {
@@ -254,15 +265,15 @@ func (w *Wrapper) Start() {
 	close(w.startCh)
 }
 
-func WrapTAP(logf logger.Logf, tdev tun.Device, m *usermetric.Registry) *Wrapper {
-	return wrap(logf, tdev, true, m)
+func WrapTAP(logf logger.Logf, tdev tun.Device, m *usermetric.Registry, bus *eventbus.Bus) *Wrapper {
+	return wrap(logf, tdev, true, m, bus)
 }
 
-func Wrap(logf logger.Logf, tdev tun.Device, m *usermetric.Registry) *Wrapper {
-	return wrap(logf, tdev, false, m)
+func Wrap(logf logger.Logf, tdev tun.Device, m *usermetric.Registry, bus *eventbus.Bus) *Wrapper {
+	return wrap(logf, tdev, false, m, bus)
 }
 
-func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry) *Wrapper {
+func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry, bus *eventbus.Bus) *Wrapper {
 	logf = logger.WithPrefix(logf, "tstun: ")
 	w := &Wrapper{
 		logf:        logf,
@@ -282,6 +293,9 @@ func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry)
 		startCh:     make(chan struct{}),
 		metrics:     registerMetrics(m),
 	}
+
+	w.eventClient = bus.Client("net.tstun")
+	w.discoKeyAdvertisementPub = eventbus.Publish[DiscoKeyAdvertisement](w.eventClient)
 
 	w.vectorBuffer = make([][]byte, tdev.BatchSize())
 	for i := range w.vectorBuffer {
@@ -357,6 +371,7 @@ func (t *Wrapper) Close() error {
 		close(t.vectorOutbound)
 		t.outboundMu.Unlock()
 		err = t.tdev.Close()
+		t.eventClient.Close()
 	})
 	return err
 }
@@ -864,6 +879,12 @@ func (t *Wrapper) filterPacketOutboundToWireGuard(p *packet.Parsed, pc *peerConf
 			return res, gro
 		}
 	}
+	if t.PreFilterPacketOutboundToWireGuardAppConnectorIntercept != nil {
+		if res := t.PreFilterPacketOutboundToWireGuardAppConnectorIntercept(p, t); res.IsDrop() {
+			// Handled by userspaceEngine's configured hook for Connectors 2025 app connectors.
+			return res, gro
+		}
+	}
 
 	// If the outbound packet is to a jailed peer, use our jailed peer
 	// packet filter.
@@ -967,6 +988,11 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 				continue
 			}
 		}
+		if buildfeatures.HasNetLog {
+			if update := t.connCounter.Load(); update != nil {
+				updateConnCounter(update, p.Buffer(), false)
+			}
+		}
 
 		// Make sure to do SNAT after filtering, so that any flow tracking in
 		// the filter sees the original source address. See #12133.
@@ -976,11 +1002,6 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 			panic(fmt.Sprintf("short copy: %d != %d", n, len(data)-res.dataOffset))
 		}
 		sizes[buffsPos] = n
-		if buildfeatures.HasNetLog {
-			if update := t.connCounter.Load(); update != nil {
-				updateConnCounter(update, p.Buffer(), false)
-			}
-		}
 		buffsPos++
 	}
 	if buffsGRO != nil {
@@ -1118,6 +1139,13 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 	return n, err
 }
 
+// DiscoKeyAdvertisement is a TSMP message used for distributing disco keys.
+// This struct is used an an event on the [eventbus.Bus].
+type DiscoKeyAdvertisement struct {
+	Src netip.Addr // Src field is populated by the IP header of the packet, not from the payload itself.
+	Key key.DiscoPublic
+}
+
 func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook packet.CaptureCallback, pc *peerConfigTable, gro *gro.GRO) (filter.Response, *gro.GRO) {
 	if captHook != nil {
 		captHook(packet.FromPeer, t.now(), p.Buffer(), p.CaptureMeta)
@@ -1127,6 +1155,12 @@ func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook pa
 		if pingReq, ok := p.AsTSMPPing(); ok {
 			t.noteActivity()
 			t.injectOutboundPong(p, pingReq)
+			return filter.DropSilently, gro
+		} else if discoKeyAdvert, ok := p.AsTSMPDiscoAdvertisement(); ok {
+			t.discoKeyAdvertisementPub.Publish(DiscoKeyAdvertisement{
+				Src: discoKeyAdvert.Src,
+				Key: discoKeyAdvert.Key,
+			})
 			return filter.DropSilently, gro
 		} else if data, ok := p.AsTSMPPong(); ok {
 			if f := t.OnTSMPPongReceived; f != nil {
@@ -1211,6 +1245,13 @@ func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook pa
 		}
 
 		return filter.Drop, gro
+	}
+
+	if t.PostFilterPacketInboundFromWireGuardAppConnector != nil {
+		if res := t.PostFilterPacketInboundFromWireGuardAppConnector(p, t); res.IsDrop() {
+			// Handled by userspaceEngine's configured hook for Connectors 2025 app connectors.
+			return res, gro
+		}
 	}
 
 	if t.PostFilterPacketInboundFromWireGuard != nil {
