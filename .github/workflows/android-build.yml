@@ -109,7 +109,7 @@ jobs:
       - name: Generate build tags
         id: tags
         run: |
-          REMOVE="aws,bird,tap,kube,completion,completion_scripts,wakeonlan,capture,systray,drive,debugeventbus,debug,debugportmapper,tailnetlock,syspolicy,appconnectors,identityfederation,taildrop,captiveportal"
+          REMOVE="aws,bird,tap,kube,completion,completion_scripts,wakeonlan,capture,systray,drive,debugeventbus,debug,debugportmapper,tailnetlock,syspolicy,appconnectors,identityfederation,taildrop,captiveportal,ssh"
           ADD="cli"
           BUILD_TAGS="$(GOOS= GOARCH= go run ./cmd/featuretags --remove "$REMOVE" --add "$ADD")"
           echo "tags=$BUILD_TAGS" >> "$GITHUB_OUTPUT"
