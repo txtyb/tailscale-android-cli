@@ -112,7 +112,6 @@ REMOVE=(
     bird
     tap
     kube
-    completion
     wakeonlan
     capture
     systray
