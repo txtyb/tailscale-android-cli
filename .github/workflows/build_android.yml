@@ -1,105 +1,158 @@
-name: "tagged-release"
+name: "Android Release Build"
+
 on:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target architecture"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - arm
+          - arm64
+      pre_release:
+        description: "Mark as pre-release"
+        required: false
+        default: false
+        type: boolean
+      upx:
+        description: "Compress with UPX"
+        required: false
+        default: true
+        type: boolean
+      create_release:
+        description: "Create GitHub Release"
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*-android"
       - "v*-android-pre"
+
 permissions:
   contents: write
+
 jobs:
   build:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Determine release type
-          id: release_type
-          run: |
-            if [[ "${{ github.ref_name }}" == *"-pre" ]]; then
-              echo "is_prerelease=true" >> $GITHUB_OUTPUT
-            else
-              echo "is_prerelease=false" >> $GITHUB_OUTPUT
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "is_prerelease=${{ github.event.inputs.pre_release }}" >> "$GITHUB_OUTPUT"
+            echo "is_manual=true" >> "$GITHUB_OUTPUT"
+          elif echo "${{ github.ref_name }}" | grep -q '\-pre$'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "is_manual=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "is_manual=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Go version
+        run: go version
+
+      - name: Install Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Build arm
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm' || github.event_name != 'workflow_dispatch' }}
+        run: |
+          NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          FLAGS=""
+          if [ "${{ steps.release_type.outputs.is_prerelease }}" = "true" ]; then
+            FLAGS="--pre"
+          fi
+          ANDROID_NDK_PATH="$NDK_BIN" ./build_android.sh $FLAGS arm
+
+      - name: Build arm64
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm64' || github.event_name != 'workflow_dispatch' }}
+        run: |
+          NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          FLAGS=""
+          if [ "${{ steps.release_type.outputs.is_prerelease }}" = "true" ]; then
+            FLAGS="--pre"
+          fi
+          ANDROID_NDK_PATH="$NDK_BIN" ./build_android.sh $FLAGS arm64
+
+      - name: Install UPX
+        if: ${{ github.event.inputs.upx != 'false' || github.event_name != 'workflow_dispatch' }}
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          install-only: true
+
+      - name: Compress binaries with UPX
+        if: ${{ github.event.inputs.upx != 'false' || github.event_name != 'workflow_dispatch' }}
+        run: |
+          for arch in arm arm64; do
+            if [ -f "dist/tailscaled.$arch" ]; then
+              echo "Compressing tailscaled.$arch ..."
+              upx --lzma --best "dist/tailscaled.$arch" || true
             fi
-        - name: Checkout code
-          uses: actions/checkout@v4
-          with:
-            fetch-depth: 0
-          
-        - name: Set up Go
-          uses: actions/setup-go@v5
-          with:
-            go-version-file: 'go.mod'
-            check-latest: true
-          id: go
-        - run: go version
+          done
 
-        - name: Install Android NDK
-          id: setup-ndk
-          uses: nttld/setup-ndk@v1
-          with:
-            ndk-version: r27c
-            add-to-path: false
-        
-        - name: Build arm
-          run: |
-            export ANDROID_NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-            if [[ "${{ steps.release_type.outputs.is_prerelease }}" == "true" ]]; then
-              ./build_android.sh --pre arm
-            else
-              ./build_android.sh arm
+      - name: Compress artifacts
+        id: compress_artifacts
+        run: |
+          eval "$(./build_dist.sh shellvars)"
+          echo "VERSION_SHORT=$VERSION_SHORT" >> "$GITHUB_OUTPUT"
+          for arch in arm arm64; do
+            if [ -f "dist/tailscaled.$arch" ]; then
+              tar -czf "dist/tailscale_${VERSION_SHORT}_${arch}.tgz" \
+                -C dist --transform="s/tailscaled.$arch/tailscaled/" "tailscaled.$arch"
             fi
-        - name: Build arm64
-          run: |
-            export ANDROID_NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-            if [[ "${{ steps.release_type.outputs.is_prerelease }}" == "true" ]]; then
-              ./build_android.sh --pre arm64
-            else
-              ./build_android.sh arm64
-            fi
-        
-        - name: Install UPX
-          uses: crazy-max/ghaction-upx@v3
-          with:
-            install-only: true
+          done
+          ls -lh dist/
 
-        - name: Compress binaries with UPX
-          run: |
-            upx --lzma --best ./dist/tailscaled.arm
-            upx --lzma --best ./dist/tailscaled.arm64
-        
-        - name: Compress artifacts
-          id: compress_artifacts
-          run: |
-            eval "$(./build_dist.sh shellvars)"
-            echo "VERSION_SHORT=$VERSION_SHORT" >> $GITHUB_OUTPUT
-            tar -czf dist/tailscale_${VERSION_SHORT}_arm64.tgz -C dist --transform='s/tailscaled.arm64/tailscaled/' tailscaled.arm64
-            tar -czf dist/tailscale_${VERSION_SHORT}_arm.tgz -C dist --transform='s/tailscaled.arm/tailscaled/' tailscaled.arm
-            ls -lh dist
+      - name: Upload release tarballs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-tarballs
+          path: dist/*.tgz
+          if-no-files-found: warn
+          retention-days: 30
 
-        - name: Upload artifacts
-          uses: actions/upload-artifact@v4
-          with:
-            name: release-artifacts
-            path: |
-              dist/*.tgz
+      - name: Upload arm binary
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm' || github.event_name != 'workflow_dispatch' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tailscaled-arm-${{ steps.compress_artifacts.outputs.VERSION_SHORT }}
+          path: dist/tailscaled.arm
+          if-no-files-found: error
+          retention-days: 30
 
-        - name: Upload artifacts for arm
-          uses: actions/upload-artifact@v4
-          with:
-            name: tailscaled.arm.${{ steps.compress_artifacts.outputs.VERSION_SHORT }}
-            path: |
-              dist/tailscaled.arm
-        
-        - name: Upload artifacts for arm64
-          uses: actions/upload-artifact@v4
-          with:
-            name: tailscaled.arm64.${{ steps.compress_artifacts.outputs.VERSION_SHORT }}
-            path: |
-              dist/tailscaled.arm64
+      - name: Upload arm64 binary
+        if: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm64' || github.event_name != 'workflow_dispatch' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tailscaled-arm64-${{ steps.compress_artifacts.outputs.VERSION_SHORT }}
+          path: dist/tailscaled.arm64
+          if-no-files-found: error
+          retention-days: 30
 
-        - name: Create Release
-          uses: "marvinpinto/action-automatic-releases@latest"
-          with:
-            repo_token: "${{ secrets.GITHUB_TOKEN }}"
-            prerelease: ${{ steps.release_type.outputs.is_prerelease }}
-            files: |
-              dist/*.tgz
+      - name: Create GitHub Release
+        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true') }}
+        uses: softprops/action-gh-release@c062c08b5328157faafdded90c85d3b8a4271b40 # v2.2.2
+        with:
+          prerelease: ${{ steps.release_type.outputs.is_prerelease }}
+          files: dist/*.tgz
+          generate_release_notes: true
