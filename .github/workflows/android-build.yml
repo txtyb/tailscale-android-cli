@@ -31,13 +31,13 @@ on:
       pre_release:
         description: "Append -pre to version"
         required: false
-        default: false
         type: boolean
+        default: false
       upx:
         description: "Compress with UPX"
         required: false
-        default: true
         type: boolean
+        default: true
 
 env:
   GO_VERSION: "1.26.3"
