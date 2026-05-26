@@ -1,0 +1,200 @@
+name: Build Android
+
+on:
+  push:
+    branches:
+      - "*-android-dev"
+      - "*-android"
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+  pull_request:
+    branches:
+      - "*-android-dev"
+      - "*-android"
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target architecture"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - arm
+          - arm64
+      pre_release:
+        description: "Append -pre to version"
+        required: false
+        default: false
+        type: boolean
+      upx:
+        description: "Compress with UPX"
+        required: false
+        default: true
+        type: boolean
+
+env:
+  GO_VERSION: "1.26.3"
+  NDK_VERSION: "r27c"
+
+jobs:
+  # Determine which architectures to build
+  matrix-prep:
+    name: Prepare matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      archs: ${{ steps.set-matrix.outputs.archs }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          ARCH="${{ github.event.inputs.arch || 'all' }}"
+          if [ "$ARCH" = "all" ]; then
+            echo 'archs=["arm","arm64"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "archs=[\"$ARCH\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: "android-${{ matrix.arch }}"
+    needs: [matrix-prep]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.matrix-prep.outputs.archs) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: /tmp/android-ndk-${{ env.NDK_VERSION }}
+          key: android-ndk-${{ env.NDK_VERSION }}-v1
+
+      - name: Download Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          curl -# -L "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip" \
+            -o /tmp/android-ndk.zip
+          unzip -q /tmp/android-ndk.zip -d /tmp
+          rm /tmp/android-ndk.zip
+
+      - name: Set NDK path
+        run: |
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+          echo "/tmp/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Get version info
+        run: |
+          eval "$(CGO_ENABLED=0 go run ./cmd/mkversion)"
+          echo "VERSION_SHORT=$VERSION_SHORT" >> "$GITHUB_ENV"
+          echo "VERSION_LONG=$VERSION_LONG" >> "$GITHUB_ENV"
+          echo "VERSION_GIT_HASH=$VERSION_GIT_HASH" >> "$GITHUB_ENV"
+
+      - name: Generate build tags
+        id: tags
+        run: |
+          REMOVE="aws,bird,tap,kube,completion,completion_scripts,wakeonlan,capture,systray,drive,debugeventbus,debug,debugportmapper,tailnetlock,syspolicy,appconnectors,identityfederation,taildrop,captiveportal"
+          ADD="cli"
+          BUILD_TAGS="$(GOOS= GOARCH= go run ./cmd/featuretags --remove "$REMOVE" --add "$ADD")"
+          echo "tags=$BUILD_TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Set up cross-compiler (${{ matrix.arch }})
+        run: |
+          case "${{ matrix.arch }}" in
+            arm)
+              echo "CC=armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
+              echo "CXX=armv7a-linux-androideabi21-clang++" >> "$GITHUB_ENV"
+              echo "GOARCH=arm" >> "$GITHUB_ENV"
+              ;;
+            arm64)
+              echo "CC=aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+              echo "CXX=aarch64-linux-android21-clang++" >> "$GITHUB_ENV"
+              echo "GOARCH=arm64" >> "$GITHUB_ENV"
+              ;;
+          esac
+          echo "GOOS=android" >> "$GITHUB_ENV"
+          echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
+
+      - name: Build tailscaled
+        run: |
+          VERSION_SHORT="${{ env.VERSION_SHORT }}"
+          if [ "${{ github.event.inputs.pre_release }}" = "true" ]; then
+            VERSION_SHORT="${VERSION_SHORT}-pre"
+          fi
+
+          LDFLAGS="-X tailscale.com/version.longStamp=${{ env.VERSION_LONG }}"
+          LDFLAGS="$LDFLAGS -X tailscale.com/version.shortStamp=${VERSION_SHORT}"
+          LDFLAGS="$LDFLAGS -X tailscale.com/version.gitCommitStamp=${{ env.VERSION_GIT_HASH }}"
+          LDFLAGS="$LDFLAGS -w -s"
+
+          mkdir -p dist
+          go build \
+            -tags="${{ steps.tags.outputs.tags }}" \
+            -ldflags="$LDFLAGS" \
+            -o "dist/tailscaled.${{ matrix.arch }}" \
+            -trimpath \
+            ./cmd/tailscaled
+
+          chmod +x "dist/tailscaled.${{ matrix.arch }}"
+          echo "::group::Binary info"
+          file "dist/tailscaled.${{ matrix.arch }}"
+          echo "Size: $(du -h dist/tailscaled.${{ matrix.arch }} | cut -f1)"
+          echo "::endgroup::"
+
+      - name: Compress with UPX
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upx != 'false' }}
+        run: |
+          if ! command -v upx &>/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq upx-ucl 2>/dev/null || {
+              curl -# -L https://github.com/upx/upx/releases/download/v5.0.2/upx-5.0.2-amd64_linux.tar.xz -o /tmp/upx.tar.xz
+              tar -xf /tmp/upx.tar.xz -C /tmp
+              sudo cp /tmp/upx-5.0.2-amd64_linux/upx /usr/local/bin/
+            }
+          fi
+          echo "Before UPX: $(du -h dist/tailscaled.${{ matrix.arch }} | cut -f1)"
+          upx --lzma --best "dist/tailscaled.${{ matrix.arch }}" || true
+          echo "After  UPX: $(du -h dist/tailscaled.${{ matrix.arch }} | cut -f1)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tailscaled-android-${{ matrix.arch }}
+          path: dist/tailscaled.${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 30
+
+  summary:
+    name: Summary
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Build status
+        run: |
+          {
+            echo "### 🤖 Android Build Results"
+            echo ""
+            echo "| Architecture | Status |"
+            echo "|-------------|--------|"
+            if [ "${{ needs.build.result }}" = "success" ]; then
+              echo "| arm / arm64 | ✅ |"
+            else
+              echo "| arm / arm64 | ❌ |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
