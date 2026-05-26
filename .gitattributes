@@ -1,2 +1,4 @@
 go.mod filter=go-mod
 *.go  diff=golang
+
+*.sh  text eol=lf
