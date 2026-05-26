@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build tailscale_go && android
+//go:build tailscale_go && android && ts_two_repo
 
 package version
 
