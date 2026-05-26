@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package backoff provides a back-off timer type.
@@ -77,4 +77,10 @@ func (b *Backoff) BackOff(ctx context.Context, err error) {
 		t.Stop()
 	case <-tChannel:
 	}
+}
+
+// Reset resets the backoff schedule, equivalent to calling BackOff with a nil
+// error.
+func (b *Backoff) Reset() {
+	b.n = 0
 }

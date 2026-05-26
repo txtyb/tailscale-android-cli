@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package driveimpl
@@ -156,27 +156,27 @@ func TestMissingPaths(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name:       "empty path",
+			name:       "empty-path",
 			path:       "",
 			wantStatus: http.StatusForbidden,
 		},
 		{
-			name:       "single slash",
+			name:       "single-slash",
 			path:       "/",
 			wantStatus: http.StatusForbidden,
 		},
 		{
-			name:       "only token",
+			name:       "only-token",
 			path:       "/" + secretToken,
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "token with trailing slash",
+			name:       "token-trailing-slash",
 			path:       "/" + secretToken + "/",
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "token and invalid share",
+			name:       "token-invalid-share",
 			path:       "/" + secretToken + "/nonexistentshare",
 			wantStatus: http.StatusNotFound,
 		},
@@ -239,7 +239,7 @@ func TestLOCK(t *testing.T) {
 	}
 
 	u := fmt.Sprintf("http://%s/%s/%s/%s/%s",
-		s.local.l.Addr(),
+		s.local.ln.Addr(),
 		url.PathEscape(domain),
 		url.PathEscape(remote1),
 		url.PathEscape(share11),
@@ -365,7 +365,7 @@ func TestUNLOCK(t *testing.T) {
 	}
 
 	u := fmt.Sprintf("http://%s/%s/%s/%s/%s",
-		s.local.l.Addr(),
+		s.local.ln.Addr(),
 		url.PathEscape(domain),
 		url.PathEscape(remote1),
 		url.PathEscape(share11),
@@ -428,12 +428,12 @@ func TestUNLOCK(t *testing.T) {
 }
 
 type local struct {
-	l  net.Listener
+	ln net.Listener
 	fs *FileSystemForLocal
 }
 
 type remote struct {
-	l           net.Listener
+	ln          net.Listener
 	fs          *FileSystemForRemote
 	fileServer  *FileServer
 	shares      map[string]string
@@ -467,14 +467,14 @@ func newSystem(t *testing.T) *system {
 	tstest.ResourceCheck(t)
 
 	fs := newFileSystemForLocal(log.Printf, nil)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to Listen: %s", err)
 	}
-	t.Logf("FileSystemForLocal listening at %s", l.Addr())
+	t.Logf("FileSystemForLocal listening at %s", ln.Addr())
 	go func() {
 		for {
-			conn, err := l.Accept()
+			conn, err := ln.Accept()
 			if err != nil {
 				t.Logf("Accept: %v", err)
 				return
@@ -483,11 +483,11 @@ func newSystem(t *testing.T) *system {
 		}
 	}()
 
-	client := gowebdav.NewAuthClient(fmt.Sprintf("http://%s", l.Addr()), &noopAuthorizer{})
+	client := gowebdav.NewAuthClient(fmt.Sprintf("http://%s", ln.Addr()), &noopAuthorizer{})
 	client.SetTransport(&http.Transport{DisableKeepAlives: true})
 	s := &system{
 		t:       t,
-		local:   &local{l: l, fs: fs},
+		local:   &local{ln: ln, fs: fs},
 		client:  client,
 		remotes: make(map[string]*remote),
 	}
@@ -496,11 +496,11 @@ func newSystem(t *testing.T) *system {
 }
 
 func (s *system) addRemote(name string) string {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		s.t.Fatalf("failed to Listen: %s", err)
 	}
-	s.t.Logf("Remote for %v listening at %s", name, l.Addr())
+	s.t.Logf("Remote for %v listening at %s", name, ln.Addr())
 
 	fileServer, err := NewFileServer()
 	if err != nil {
@@ -510,21 +510,21 @@ func (s *system) addRemote(name string) string {
 	s.t.Logf("FileServer for %v listening at %s", name, fileServer.Addr())
 
 	r := &remote{
-		l:           l,
+		ln:          ln,
 		fileServer:  fileServer,
 		fs:          NewFileSystemForRemote(log.Printf),
 		shares:      make(map[string]string),
 		permissions: make(map[string]drive.Permission),
 	}
 	r.fs.SetFileServerAddr(fileServer.Addr())
-	go http.Serve(l, r)
+	go http.Serve(ln, r)
 	s.remotes[name] = r
 
 	remotes := make([]*drive.Remote, 0, len(s.remotes))
 	for name, r := range s.remotes {
 		remotes = append(remotes, &drive.Remote{
 			Name: name,
-			URL:  func() string { return fmt.Sprintf("http://%s", r.l.Addr()) },
+			URL:  func() string { return fmt.Sprintf("http://%s", r.ln.Addr()) },
 		})
 	}
 	s.local.fs.SetRemotes(
@@ -683,7 +683,7 @@ func (s *system) stop() {
 		s.t.Fatalf("failed to Close fs: %s", err)
 	}
 
-	err = s.local.l.Close()
+	err = s.local.ln.Close()
 	if err != nil {
 		s.t.Fatalf("failed to Close listener: %s", err)
 	}
@@ -694,7 +694,7 @@ func (s *system) stop() {
 			s.t.Fatalf("failed to Close remote fs: %s", err)
 		}
 
-		err = r.l.Close()
+		err = r.ln.Close()
 		if err != nil {
 			s.t.Fatalf("failed to Close remote listener: %s", err)
 		}

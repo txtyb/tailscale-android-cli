@@ -1,10 +1,11 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tka
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -253,7 +254,7 @@ func TestOpenAuthority(t *testing.T) {
 	}
 
 	// Construct the state of durable storage.
-	chonk := &Mem{}
+	chonk := ChonkMem()
 	err := chonk.CommitVerifiedAUMs([]AUM{g1, i1, l1, i2, i3, l2, l3, g2, l4})
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +276,7 @@ func TestOpenAuthority(t *testing.T) {
 }
 
 func TestOpenAuthority_EmptyErrors(t *testing.T) {
-	_, err := Open(&Mem{})
+	_, err := Open(ChonkMem())
 	if err == nil {
 		t.Error("Expected an error initializing an empty authority, got nil")
 	}
@@ -303,10 +304,7 @@ func TestAuthorityValidDisablement(t *testing.T) {
 
         G1.template = genesis
     `,
-		optTemplate("genesis", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{key},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-		}}),
+		genesisTemplate(key),
 	)
 
 	a, _ := Open(c.Chonk())
@@ -319,15 +317,15 @@ func TestCreateBootstrapAuthority(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
 
-	a1, genesisAUM, err := Create(&Mem{}, State{
-		Keys:               []Key{key},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
+	a1, genesisAUM, err := Create(ChonkMem(), State{
+		Keys:              []Key{key},
+		DisablementValues: [][]byte{DisablementKDF([]byte{1, 2, 3})},
 	}, signer25519(priv))
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
 
-	a2, err := Bootstrap(&Mem{}, genesisAUM)
+	a2, err := Bootstrap(ChonkMem(), genesisAUM)
 	if err != nil {
 		t.Fatalf("Bootstrap() failed: %v", err)
 	}
@@ -345,6 +343,65 @@ func TestCreateBootstrapAuthority(t *testing.T) {
 	}
 }
 
+// Trying to bootstrap an already-bootstrapped Chonk is an error.
+func TestBootstrapChonkMustBeEmpty(t *testing.T) {
+	chonk := ChonkMem()
+
+	pub, priv := testingKey25519(t, 1)
+	key := Key{Kind: Key25519, Public: pub, Votes: 2}
+	state := State{
+		Keys:              []Key{key},
+		DisablementValues: [][]byte{DisablementKDF([]byte{1, 2, 3})},
+	}
+
+	// Bootstrap our chonk for the first time, which should succeed.
+	_, _, err := Create(chonk, state, signer25519(priv))
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	// Bootstrap our chonk for the second time, which should fail, because
+	// it already contains data.
+	_, _, err = Create(chonk, state, signer25519(priv))
+	if wantErr := "tailchonk is not empty"; err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("Create() did not fail with expected error: want %q, got %v", wantErr, err)
+	}
+}
+
+func TestBootstrapWithInvalidAUMs(t *testing.T) {
+	for _, tt := range []struct {
+		Name       string
+		GenesisAUM AUM
+		WantErr    string
+	}{
+		{
+			Name:       "invalid-message-kind",
+			GenesisAUM: AUM{MessageKind: AUMNoOp},
+			WantErr:    "bootstrap AUMs must be checkpoint messages",
+		},
+		{
+			Name:       "missing-state",
+			GenesisAUM: AUM{MessageKind: AUMCheckpoint},
+			WantErr:    "bootstrap AUM is missing state",
+		},
+		{
+			Name: "no-disablement-secret",
+			GenesisAUM: AUM{
+				MessageKind: AUMCheckpoint,
+				State:       &State{},
+			},
+			WantErr: "at least one disablement secret required",
+		},
+	} {
+		t.Run(tt.Name, func(t *testing.T) {
+			_, err := Bootstrap(ChonkMem(), tt.GenesisAUM)
+			if err == nil || !strings.Contains(err.Error(), tt.WantErr) {
+				t.Fatalf("Bootstrap() did not fail with expected error: want %q, got %v", tt.WantErr, err)
+			}
+		})
+	}
+}
+
 func TestAuthorityInformNonLinear(t *testing.T) {
 	pub, priv := testingKey25519(t, 1)
 	key := Key{Kind: Key25519, Public: pub, Votes: 2}
@@ -359,14 +416,11 @@ func TestAuthorityInformNonLinear(t *testing.T) {
         L2.hashSeed = 2
         L4.hashSeed = 2
     `,
-		optTemplate("genesis", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{key},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-		}}),
+		genesisTemplate(key),
 		optKey("key", key, priv),
 		optSignAllUsing("key"))
 
-	storage := &Mem{}
+	storage := ChonkMem()
 	a, err := Bootstrap(storage, c.AUMs["G1"])
 	if err != nil {
 		t.Fatalf("Bootstrap() failed: %v", err)
@@ -404,14 +458,11 @@ func TestAuthorityInformLinear(t *testing.T) {
 
         G1.template = genesis
     `,
-		optTemplate("genesis", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{key},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-		}}),
+		genesisTemplate(key),
 		optKey("key", key, priv),
 		optSignAllUsing("key"))
 
-	storage := &Mem{}
+	storage := ChonkMem()
 	a, err := Bootstrap(storage, c.AUMs["G1"])
 	if err != nil {
 		t.Fatalf("Bootstrap() failed: %v", err)
@@ -444,7 +495,7 @@ func TestInteropWithNLKey(t *testing.T) {
 	pub2 := key.NewNLPrivate().Public()
 	pub3 := key.NewNLPrivate().Public()
 
-	a, _, err := Create(&Mem{}, State{
+	a, _, err := Create(ChonkMem(), State{
 		Keys: []Key{
 			{
 				Kind:   Key25519,
@@ -457,7 +508,7 @@ func TestInteropWithNLKey(t *testing.T) {
 				Public: pub2.KeyID(),
 			},
 		},
-		DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
+		DisablementValues: [][]byte{DisablementKDF([]byte{1, 2, 3})},
 	}, priv1)
 	if err != nil {
 		t.Errorf("tka.Create: %v", err)
@@ -485,13 +536,10 @@ func TestAuthorityCompact(t *testing.T) {
         G.template = genesis
         C.template = checkpoint2
     `,
-		optTemplate("genesis", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{key},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-		}}),
+		genesisTemplate(key),
 		optTemplate("checkpoint2", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{key},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
+			Keys:              []Key{key},
+			DisablementValues: [][]byte{DisablementKDF([]byte{1, 2, 3})},
 		}}),
 		optKey("key", key, priv),
 		optSignAllUsing("key"))
@@ -542,10 +590,7 @@ func TestFindParentForRewrite(t *testing.T) {
         C.template = add3
         D.template = remove2
     `,
-		optTemplate("genesis", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{k1},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-		}}),
+		genesisTemplate(k1),
 		optTemplate("add2", AUM{MessageKind: AUMAddKey, Key: &k2}),
 		optTemplate("add3", AUM{MessageKind: AUMAddKey, Key: &k3}),
 		optTemplate("remove2", AUM{MessageKind: AUMRemoveKey, KeyID: k2ID}))
@@ -611,10 +656,7 @@ func TestMakeRetroactiveRevocation(t *testing.T) {
         C.template = add2
         D.template = add3
     `,
-		optTemplate("genesis", AUM{MessageKind: AUMCheckpoint, State: &State{
-			Keys:               []Key{k1},
-			DisablementSecrets: [][]byte{DisablementKDF([]byte{1, 2, 3})},
-		}}),
+		genesisTemplate(k1),
 		optTemplate("add2", AUM{MessageKind: AUMAddKey, Key: &k2}),
 		optTemplate("add3", AUM{MessageKind: AUMAddKey, Key: &k3}))
 

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package certs
@@ -12,7 +12,6 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/kube/localclient"
 	"tailscale.com/tailcfg"
-	"tailscale.com/types/netmap"
 )
 
 // TestEnsureCertLoops tests that the certManager correctly starts and stops
@@ -128,6 +127,43 @@ func TestEnsureCertLoops(t *testing.T) {
 			updatedGoroutines: 1, // one loop after removing service2
 		},
 		{
+			name: "tcp_terminate_tls",
+			initialConfig: &ipn.ServeConfig{
+				Services: map[tailcfg.ServiceName]*ipn.ServiceConfig{
+					"svc:my-apiserver": {
+						TCP: map[uint16]*ipn.TCPPortHandler{
+							443: {
+								TCPForward:   "localhost:80",
+								TerminateTLS: "my-apiserver.tailnetxyz.ts.net",
+							},
+						},
+					},
+				},
+			},
+			initialGoroutines: 1,
+		},
+		{
+			name: "tcp_terminate_tls_and_web",
+			initialConfig: &ipn.ServeConfig{
+				Services: map[tailcfg.ServiceName]*ipn.ServiceConfig{
+					"svc:my-apiserver": {
+						TCP: map[uint16]*ipn.TCPPortHandler{
+							443: {
+								TCPForward:   "localhost:80",
+								TerminateTLS: "my-apiserver.tailnetxyz.ts.net",
+							},
+						},
+					},
+					"svc:my-app": {
+						Web: map[ipn.HostPort]*ipn.WebServerConfig{
+							"my-app.tailnetxyz.ts.net:443": {},
+						},
+					},
+				},
+			},
+			initialGoroutines: 2,
+		},
+		{
 			name: "add_domain",
 			initialConfig: &ipn.ServeConfig{
 				Services: map[tailcfg.ServiceName]*ipn.ServiceConfig{
@@ -164,16 +200,11 @@ func TestEnsureCertLoops(t *testing.T) {
 
 			notifyChan := make(chan ipn.Notify)
 			go func() {
+				// SelfChange wakes the cert manager; cert domains are
+				// then fetched via FakeLocalClient.CertDomainsResult.
 				for {
 					notifyChan <- ipn.Notify{
-						NetMap: &netmap.NetworkMap{
-							DNS: tailcfg.DNSConfig{
-								CertDomains: []string{
-									"my-app.tailnetxyz.ts.net",
-									"my-other-app.tailnetxyz.ts.net",
-								},
-							},
-						},
+						SelfChange: &tailcfg.Node{StableID: "test"},
 					}
 				}
 			}()
@@ -181,6 +212,11 @@ func TestEnsureCertLoops(t *testing.T) {
 				lc: &localclient.FakeLocalClient{
 					FakeIPNBusWatcher: localclient.FakeIPNBusWatcher{
 						NotifyChan: notifyChan,
+					},
+					CertDomainsResult: []string{
+						"my-app.tailnetxyz.ts.net",
+						"my-other-app.tailnetxyz.ts.net",
+						"my-apiserver.tailnetxyz.ts.net",
 					},
 				},
 				logf:      log.Printf,

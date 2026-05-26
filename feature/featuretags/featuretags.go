@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // The featuretags package is a registry of all the ts_omit-able build tags.
@@ -84,7 +84,7 @@ type FeatureMeta struct {
 	Deps []FeatureTag // other features this feature requires
 
 	// ImplementationDetail is whether the feature is an internal implementation
-	// detail. That is, it's not something a user wuold care about having or not
+	// detail. That is, it's not something a user would care about having or not
 	// having, but we'd like to able to omit from builds if no other
 	// user-visible features depend on it.
 	ImplementationDetail bool
@@ -123,9 +123,14 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc:                 "Control-to-node (C2N) support",
 		ImplementationDetail: true,
 	},
+	"cachenetmap": {
+		Sym:  "CacheNetMap",
+		Desc: "Cache the netmap on disk between runs",
+	},
 	"captiveportal": {Sym: "CaptivePortal", Desc: "Captive portal detection"},
 	"capture":       {Sym: "Capture", Desc: "Packet capture"},
 	"cli":           {Sym: "CLI", Desc: "embed the CLI into the tailscaled binary"},
+	"colorable":     {Sym: "Colorable", Desc: "Colorized terminal output"},
 	"cliconndiag":   {Sym: "CLIConnDiag", Desc: "CLI connection error diagnostics"},
 	"clientmetrics": {Sym: "ClientMetrics", Desc: "Client metrics support"},
 	"clientupdate": {
@@ -134,7 +139,12 @@ var Features = map[FeatureTag]FeatureMeta{
 		Deps: []FeatureTag{"c2n"},
 	},
 	"completion": {Sym: "Completion", Desc: "CLI shell completion"},
-	"cloud":      {Sym: "Cloud", Desc: "detect cloud environment to learn instances IPs and DNS servers"},
+	"conn25":     {Sym: "Conn25", Desc: "Route traffic for configured domains through connector devices"},
+	"completion_scripts": {
+		Sym: "CompletionScripts", Desc: "embed CLI shell completion scripts",
+		Deps: []FeatureTag{"completion"},
+	},
+	"cloud": {Sym: "Cloud", Desc: "detect cloud environment to learn instances IPs and DNS servers"},
 	"dbus": {
 		Sym:                  "DBus",
 		Desc:                 "Linux DBus support",
@@ -158,9 +168,9 @@ var Features = map[FeatureTag]FeatureMeta{
 	"health":             {Sym: "Health", Desc: "Health checking support"},
 	"hujsonconf":         {Sym: "HuJSONConf", Desc: "HuJSON config file support"},
 	"identityfederation": {Sym: "IdentityFederation", Desc: "Auth key generation via identity federation support"},
+	"ipnbus":             {Sym: "IPNBus", Desc: "IPN notification bus (watch-ipn-bus) support, used by GUIs, debugging, and nicer 'tailscale up' support"},
 	"iptables":           {Sym: "IPTables", Desc: "Linux iptables support"},
 	"kube":               {Sym: "Kube", Desc: "Kubernetes integration"},
-	"lazywg":             {Sym: "LazyWG", Desc: "Lazy WireGuard configuration for memory-constrained devices with large netmaps"},
 	"linuxdnsfight":      {Sym: "LinuxDNSFight", Desc: "Linux support for detecting DNS fights (inotify watching of /etc/resolv.conf)"},
 	"linkspeed": {
 		Sym:  "LinkSpeed",
@@ -218,6 +228,7 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc: "Linux NetworkManager integration",
 		Deps: []FeatureTag{"dbus"},
 	},
+	"qrcodes":     {Sym: "QRCodes", Desc: "QR codes in tailscale CLI"},
 	"relayserver": {Sym: "RelayServer", Desc: "Relay server"},
 	"resolved": {
 		Sym:  "Resolved",
@@ -246,7 +257,7 @@ var Features = map[FeatureTag]FeatureMeta{
 	"systray": {
 		Sym:  "SysTray",
 		Desc: "Linux system tray",
-		Deps: []FeatureTag{"dbus"},
+		Deps: []FeatureTag{"dbus", "webbrowser"},
 	},
 	"taildrop": {
 		Sym:  "Taildrop",
@@ -258,6 +269,7 @@ var Features = map[FeatureTag]FeatureMeta{
 	"tailnetlock": {Sym: "TailnetLock", Desc: "Tailnet Lock support"},
 	"tap":         {Sym: "Tap", Desc: "Experimental Layer 2 (ethernet) support"},
 	"tpm":         {Sym: "TPM", Desc: "TPM support"},
+	"tundevstats": {Sym: "TUNDevStats", Desc: "Poll TUN device statistics (Linux only)"},
 	"unixsocketidentity": {
 		Sym:  "UnixSocketIdentity",
 		Desc: "differentiate between users accessing the LocalAPI over unix sockets (if omitted, all users have full access)",
@@ -280,6 +292,10 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc: "Usermetrics (documented, stable) metrics support",
 	},
 	"wakeonlan": {Sym: "WakeOnLAN", Desc: "Wake-on-LAN support"},
+	"webbrowser": {
+		Sym:  "WebBrowser",
+		Desc: "Open URLs in the user's web browser",
+	},
 	"webclient": {
 		Sym: "WebClient", Desc: "Web client support",
 		Deps: []FeatureTag{"serve"},

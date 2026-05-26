@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux
@@ -255,13 +255,13 @@ func TestWaitTillSafeToShutdown(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfgs := &egressservices.Configs{}
+			cfgs := egressservices.Configs{}
 			switches := make(map[string]int)
 
 			for svc, callsToSwitch := range tt.services {
 				endpoint := fmt.Sprintf("http://%s.local", svc)
 				if tt.healthCheckSet {
-					(*cfgs)[svc] = egressservices.Config{
+					cfgs[svc] = egressservices.Config{
 						HealthCheckEndpoint: endpoint,
 					}
 				}

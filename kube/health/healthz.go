@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !plan9
@@ -65,8 +65,8 @@ func (h *Healthz) MonitorHealth(ctx context.Context, lc *local.Client) error {
 			return err
 		}
 
-		if n.NetMap != nil {
-			h.Update(n.NetMap.SelfNode.Addresses().Len() != 0)
+		if self := n.SelfChange; self != nil {
+			h.Update(len(self.Addresses) != 0)
 		}
 	}
 }

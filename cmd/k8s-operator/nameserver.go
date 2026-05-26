@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !plan9
@@ -26,11 +26,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
+
 	tsoperator "tailscale.com/k8s-operator"
 	tsapi "tailscale.com/k8s-operator/apis/v1alpha1"
 	"tailscale.com/kube/kubetypes"
 	"tailscale.com/tstime"
-	"tailscale.com/types/ptr"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/set"
 )
@@ -45,10 +45,7 @@ const (
 	messageMultipleDNSConfigsPresent = "Multiple DNSConfig resources found in cluster. Please ensure no more than one is present."
 
 	defaultNameserverImageRepo = "tailscale/k8s-nameserver"
-	// TODO (irbekrm): once we start publishing nameserver images for stable
-	// track, replace 'unstable' here with the version of this operator
-	// instance.
-	defaultNameserverImageTag = "unstable"
+	defaultNameserverImageTag  = "stable"
 )
 
 // NameserverReconciler knows how to create nameserver resources in cluster in
@@ -193,6 +190,8 @@ func (a *NameserverReconciler) maybeProvision(ctx context.Context, tsDNSCfg *tsa
 	}
 	if tsDNSCfg.Spec.Nameserver.Pod != nil {
 		dCfg.tolerations = tsDNSCfg.Spec.Nameserver.Pod.Tolerations
+		dCfg.affinity = tsDNSCfg.Spec.Nameserver.Pod.Affinity
+		dCfg.nodeSelector = tsDNSCfg.Spec.Nameserver.Pod.NodeSelector
 	}
 
 	for _, deployable := range []deployable{saDeployable, deployDeployable, svcDeployable, cmDeployable} {
@@ -220,14 +219,16 @@ type deployable struct {
 }
 
 type deployConfig struct {
-	replicas    int32
-	imageRepo   string
-	imageTag    string
-	labels      map[string]string
-	ownerRefs   []metav1.OwnerReference
-	namespace   string
-	clusterIP   string
-	tolerations []corev1.Toleration
+	replicas     int32
+	imageRepo    string
+	imageTag     string
+	labels       map[string]string
+	ownerRefs    []metav1.OwnerReference
+	namespace    string
+	clusterIP    string
+	tolerations  []corev1.Toleration
+	affinity     *corev1.Affinity
+	nodeSelector map[string]string
 }
 
 var (
@@ -247,12 +248,14 @@ var (
 			if err := yaml.Unmarshal(deployYaml, &d); err != nil {
 				return fmt.Errorf("error unmarshalling Deployment yaml: %w", err)
 			}
-			d.Spec.Replicas = ptr.To(cfg.replicas)
+			d.Spec.Replicas = new(cfg.replicas)
 			d.Spec.Template.Spec.Containers[0].Image = fmt.Sprintf("%s:%s", cfg.imageRepo, cfg.imageTag)
 			d.ObjectMeta.Namespace = cfg.namespace
 			d.ObjectMeta.Labels = cfg.labels
 			d.ObjectMeta.OwnerReferences = cfg.ownerRefs
 			d.Spec.Template.Spec.Tolerations = cfg.tolerations
+			d.Spec.Template.Spec.Affinity = cfg.affinity
+			d.Spec.Template.Spec.NodeSelector = cfg.nodeSelector
 			updateF := func(oldD *appsv1.Deployment) {
 				oldD.Spec = d.Spec
 			}

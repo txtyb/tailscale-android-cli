@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package certs implements logic to help multiple Kubernetes replicas share TLS
@@ -53,6 +53,7 @@ func (cm *CertManager) EnsureCertLoops(ctx context.Context, sc *ipn.ServeConfig)
 	currentDomains := make(map[string]bool)
 	const httpsPort = "443"
 	for _, service := range sc.Services {
+		// L7 Web handlers (HA Ingress).
 		for hostPort := range service.Web {
 			domain, port, err := net.SplitHostPort(string(hostPort))
 			if err != nil {
@@ -62,6 +63,12 @@ func (cm *CertManager) EnsureCertLoops(ctx context.Context, sc *ipn.ServeConfig)
 				continue
 			}
 			currentDomains[domain] = true
+		}
+		// L4 TCP handlers with TLS termination (kube-apiserver proxy).
+		for _, handler := range service.TCP {
+			if handler != nil && handler.TerminateTLS != "" {
+				currentDomains[handler.TerminateTLS] = true
+			}
 		}
 	}
 	cm.mu.Lock()
@@ -164,8 +171,9 @@ func (cm *CertManager) runCertLoop(ctx context.Context, domain string) {
 	}
 }
 
-// waitForCertDomain ensures the requested domain is in the list of allowed
-// domains before issuing the cert for the first time.
+// domains before issuing the cert for the first time. It uses the IPN bus
+// only as a wake-up trigger (Notify.SelfChange) and queries the current
+// cert domains explicitly via [LocalClient.CertDomains].
 func (cm *CertManager) waitForCertDomain(ctx context.Context, domain string) error {
 	w, err := cm.lc.WatchIPNBus(ctx, ipn.NotifyInitialNetMap)
 	if err != nil {
@@ -178,11 +186,14 @@ func (cm *CertManager) waitForCertDomain(ctx context.Context, domain string) err
 		if err != nil {
 			return err
 		}
-		if n.NetMap == nil {
+		if n.SelfChange == nil {
 			continue
 		}
-
-		if slices.Contains(n.NetMap.DNS.CertDomains, domain) {
+		domains, err := cm.lc.CertDomains(ctx)
+		if err != nil {
+			continue
+		}
+		if slices.Contains(domains, domain) {
 			return nil
 		}
 	}

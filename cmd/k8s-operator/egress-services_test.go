@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !plan9
@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	tsapi "tailscale.com/k8s-operator/apis/v1alpha1"
 	"tailscale.com/kube/egressservices"
 	"tailscale.com/tstest"
@@ -203,8 +204,9 @@ func clusterIPSvc(name string, extNSvc *corev1.Service) *corev1.Service {
 			Labels:       labels,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:  corev1.ServiceTypeClusterIP,
-			Ports: ports,
+			Type:           corev1.ServiceTypeClusterIP,
+			IPFamilyPolicy: new(corev1.IPFamilyPolicyPreferDualStack),
+			Ports:          ports,
 		},
 	}
 }
@@ -243,15 +245,15 @@ func portsForEndpointSlice(svc *corev1.Service) []discoveryv1.EndpointPort {
 		ports = append(ports, discoveryv1.EndpointPort{
 			Name:     &p.Name,
 			Protocol: &p.Protocol,
-			Port:     pointer.ToInt32(p.TargetPort.IntVal),
+			Port:     new(p.TargetPort.IntVal),
 		})
 	}
 	return ports
 }
 
-func mustHaveConfigForSvc(t *testing.T, cl client.Client, extNSvc, clusterIPSvc *corev1.Service, cm *corev1.ConfigMap, l *zap.Logger) {
+func mustHaveConfigForSvc(t *testing.T, cl client.Client, extNSvc, clusterIPSvc *corev1.Service, cm *corev1.ConfigMap, lg *zap.Logger) {
 	t.Helper()
-	wantsCfg := egressSvcCfg(extNSvc, clusterIPSvc, clusterIPSvc.Namespace, l.Sugar())
+	wantsCfg := egressSvcCfg(extNSvc, clusterIPSvc, clusterIPSvc.Namespace, lg.Sugar())
 	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(cm), cm); err != nil {
 		t.Fatalf("Error retrieving ConfigMap: %v", err)
 	}
@@ -283,11 +285,11 @@ func configFromCM(t *testing.T, cm *corev1.ConfigMap, svcName string) *egressser
 	if !ok {
 		return nil
 	}
-	cfgs := &egressservices.Configs{}
-	if err := json.Unmarshal(cfgBs, cfgs); err != nil {
+	cfgs := egressservices.Configs{}
+	if err := json.Unmarshal(cfgBs, &cfgs); err != nil {
 		t.Fatalf("error unmarshalling config: %v", err)
 	}
-	cfg, ok := (*cfgs)[svcName]
+	cfg, ok := cfgs[svcName]
 	if ok {
 		return &cfg
 	}
