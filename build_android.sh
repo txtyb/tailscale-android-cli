@@ -113,7 +113,6 @@ REMOVE=(
     tap
     kube
     completion
-    completion_scripts
     wakeonlan
     capture
     systray
@@ -123,11 +122,6 @@ REMOVE=(
     identityfederation
     taildrop
     captiveportal
-    ssh
-    debug
-    debugeventbus
-    debugportmapper
-    tailnetlock
 )
 
 ADD=(
